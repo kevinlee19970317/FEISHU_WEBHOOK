@@ -393,10 +393,10 @@ def main():
     conn.close()
     print(f"fetched_records={fetched_count}")
     print(f"alerts_sent={triggered_count}")
-    if fetched_count == 0:
-        print("hint: fetched_records=0 通常表示 API 没返回可解析票价，请检查 RAPIDAPI_* 参数与 fromId/toId 格式")
     if RATE_LIMIT_ABORTED:
         print("hint: 本次请求被 RapidAPI 限流中止，可降低频率/路线数，或增大 REQUEST_INTERVAL_SECONDS")
+    elif fetched_count == 0:
+        print("hint: fetched_records=0 通常表示 API 没返回可解析票价，请检查 RAPIDAPI_* 参数与 fromId/toId 格式")
 
 
 if __name__ == "__main__":
