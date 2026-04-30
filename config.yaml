@@ -1,6 +1,7 @@
 threshold_ratio: 0.7
 lookahead_days: 90
 direct_only: true
+email_enabled: true
 
 origins:
   - SHA
