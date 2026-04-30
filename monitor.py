@@ -149,6 +149,93 @@ def should_force_alert() -> bool:
     return (os.getenv("FORCE_ALERT", "false").strip().lower() == "true")
 
 
+
+
+def map_skyscanner_result_to_prices(payload: dict, fallback_depart_date: str, deep_link: str = ""):
+    result = []
+    data = payload.get("data") or {}
+
+    itineraries = data.get("itineraries") or []
+    for it in itineraries:
+        pricing_options = it.get("pricingOptions") or []
+        if not pricing_options:
+            continue
+        best = pricing_options[0]
+        for opt in pricing_options[1:]:
+            if (opt.get("price", {}).get("amount") or float("inf")) < (best.get("price", {}).get("amount") or float("inf")):
+                best = opt
+        amount = best.get("price", {}).get("amount")
+        if amount is None:
+            continue
+        legs = it.get("legs") or []
+        is_direct = True
+        depart_date = fallback_depart_date
+        for leg in legs:
+            if leg.get("stopCount", 0) > 0:
+                is_direct = False
+            if leg.get("departure"):
+                depart_date = str(leg["departure"])[:10]
+        result.append({
+            "depart_date": depart_date,
+            "price": float(amount),
+            "is_direct": is_direct,
+            "url": best.get("url") or deep_link,
+        })
+
+    flights = data.get("flights") or []
+    for f in flights:
+        price_obj = f.get("price") or {}
+        amount = price_obj.get("amount") or price_obj.get("units") or price_obj.get("total")
+        if amount is None:
+            continue
+        stop_count = f.get("stopCount")
+        is_direct = (stop_count == 0) if stop_count is not None else bool(f.get("isDirect", False))
+        depart_date = str(f.get("departureDate") or fallback_depart_date)[:10]
+        result.append({
+            "depart_date": depart_date,
+            "price": float(amount),
+            "is_direct": is_direct,
+            "url": f.get("deepLink") or deep_link,
+        })
+
+    return result
+
+
+def fetch_prices_via_skyscanner(origin, dest, start_date):
+    api_key = (os.getenv("SKYSCANNER_API_KEY") or "").strip()
+    endpoint = env_or_default("SKYSCANNER_URL", "")
+    if not api_key or not endpoint:
+        return []
+
+    params = {
+        "origin": origin,
+        "destination": dest,
+        "date": start_date,
+        "market": env_or_default("SKYSCANNER_MARKET", "CN"),
+        "locale": env_or_default("SKYSCANNER_LOCALE", "zh-CN"),
+        "currency": env_or_default("SKYSCANNER_CURRENCY", "CNY"),
+    }
+    extra = os.getenv("SKYSCANNER_EXTRA_PARAMS", "")
+    if extra:
+        try:
+            params.update(json.loads(extra))
+        except json.JSONDecodeError:
+            pass
+
+    headers = {"x-api-key": api_key}
+    try:
+        r = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        r.raise_for_status()
+        payload = r.json()
+    except requests.RequestException as exc:
+        if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+            print(f"debug: skyscanner request failed: {exc}")
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+    return map_skyscanner_result_to_prices(payload, start_date, endpoint)
+
 def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=True):
     global RATE_LIMIT_ABORTED
     if RATE_LIMIT_ABORTED:
@@ -308,6 +395,10 @@ def fetch_prices_for_route(origin, dest, start_date, end_date, direct_only=True)
     if os.getenv("MOCK_PRICE_MODE", "false").lower() == "true":
         start_day = date.fromisoformat(start_date)
         return build_mock_prices(start_day, route)
+
+    skyscanner_results = fetch_prices_via_skyscanner(origin, dest, start_date)
+    if skyscanner_results:
+        return skyscanner_results
 
     rapidapi_results = fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only)
     if rapidapi_results:
