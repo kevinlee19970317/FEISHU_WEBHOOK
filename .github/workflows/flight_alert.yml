@@ -41,4 +41,5 @@ jobs:
           RAPIDAPI_FLIGHTS_URL: ${{ secrets.RAPIDAPI_FLIGHTS_URL }}
           RAPIDAPI_CURRENCY: ${{ secrets.RAPIDAPI_CURRENCY }}
           RAPIDAPI_EXTRA_PARAMS: ${{ secrets.RAPIDAPI_EXTRA_PARAMS }}
+          DEBUG_MONITOR: true
         run: python monitor.py
