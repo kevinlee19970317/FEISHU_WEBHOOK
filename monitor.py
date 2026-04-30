@@ -143,6 +143,8 @@ def should_alert(current_price, avg_30d, threshold_ratio):
     return avg_30d is not None and avg_30d > 0 and current_price <= avg_30d * threshold_ratio
 
 
+def should_force_alert() -> bool:
+    return (os.getenv("FORCE_ALERT", "false").strip().lower() == "true")
 
 
 def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=True):
@@ -183,17 +185,30 @@ def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=Tr
     r.raise_for_status()
     payload = r.json()
 
-    data = payload.get("data") or {}
+    if not isinstance(payload, dict):
+        return []
+
+    data = payload.get("data")
+    if isinstance(data, str):
+        # Some endpoints return data as message string on soft failures
+        return []
+    if not isinstance(data, dict):
+        data = {}
 
     # getMinPrice style response
     min_price = data.get("minPrice") or data.get("price") or payload.get("minPrice")
     if min_price is not None:
-        return [{
-            "depart_date": start_date,
-            "price": float(min_price),
-            "is_direct": True,
-            "url": endpoint,
-        }]
+        try:
+            min_price_value = float(min_price)
+        except (TypeError, ValueError):
+            min_price_value = None
+        if min_price_value is not None:
+            return [{
+                "depart_date": start_date,
+                "price": min_price_value,
+                "is_direct": True,
+                "url": endpoint,
+            }]
 
     # searchFlights style response
     flights = data.get("flights", [])
@@ -267,6 +282,9 @@ def main():
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
+    fetched_count = 0
+    triggered_count = 0
+
     if os.getenv("MOCK_PRICE_MODE", "false").lower() == "true":
         mock_baseline = float(os.getenv("MOCK_BASELINE_PRICE", "2000"))
         baseline_depart = (start + timedelta(days=7)).isoformat()
@@ -297,9 +315,10 @@ def main():
                     continue
 
                 save_price(conn, route, depart_date, price, is_direct)
+                fetched_count += 1
                 avg_30d = get_avg_30d(conn, route, depart_date)
 
-                if should_alert(price, avg_30d, threshold_ratio):
+                if should_alert(price, avg_30d, threshold_ratio) or should_force_alert():
                     if already_alerted_recently(conn, route, depart_date, price, hours=24):
                         continue
 
@@ -315,8 +334,11 @@ def main():
                     )
                     notify_dual(webhook, text, email_enabled)
                     save_alert(conn, route, depart_date, price)
+                    triggered_count += 1
 
     conn.close()
+    print(f"fetched_records={fetched_count}")
+    print(f"alerts_sent={triggered_count}")
 
 
 if __name__ == "__main__":
