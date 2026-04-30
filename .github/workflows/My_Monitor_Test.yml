@@ -1,3 +1,5 @@
+name: My Monitor Test
+
 on:
   push:                # 代码推送时自动触发
   workflow_dispatch:   # 👈 加上这一行，开启手动触发开关
