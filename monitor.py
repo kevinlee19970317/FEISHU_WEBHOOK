@@ -10,6 +10,7 @@ import json
 import time
 
 DB_PATH = "prices.db"
+RATE_LIMIT_ABORTED = False
 
 
 def env_or_default(name: str, default: str) -> str:
@@ -149,6 +150,9 @@ def should_force_alert() -> bool:
 
 
 def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=True):
+    global RATE_LIMIT_ABORTED
+    if RATE_LIMIT_ABORTED:
+        return []
     endpoint = env_or_default("RAPIDAPI_FLIGHTS_URL", "https://booking-com15.p.rapidapi.com/api/v1/flights/getMinPrice")
     host = (os.getenv("RAPIDAPI_HOST") or "").strip()
     key = (os.getenv("RAPIDAPI_KEY") or "").strip()
@@ -193,19 +197,32 @@ def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=Tr
             f"departDate={params.get('departDate')}"
         )
 
-    try:
-        r = requests.get(endpoint, headers=headers, params=params, timeout=30)
-        if r.status_code == 429:
-            retry_after = r.headers.get("Retry-After")
+    max_retries = int(env_or_default("RAPIDAPI_RETRIES", "2"))
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.get(endpoint, headers=headers, params=params, timeout=30)
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                wait_seconds = 0
+                if retry_after and retry_after.isdigit():
+                    wait_seconds = int(retry_after)
+                else:
+                    wait_seconds = min(2 ** attempt, 8)
+                if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+                    print(f"debug: rapidapi rate limited (429), retry_after={retry_after}, wait={wait_seconds}s, attempt={attempt+1}")
+                if attempt < max_retries:
+                    time.sleep(wait_seconds)
+                    continue
+                RATE_LIMIT_ABORTED = True
+                print("warn: RapidAPI 429 持续触发，已中止本次剩余路线请求（避免继续撞限流）")
+                return []
+            r.raise_for_status()
+            payload = r.json()
+            break
+        except requests.RequestException as exc:
             if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
-                print(f"debug: rapidapi rate limited (429), retry_after={retry_after}")
+                print(f"debug: request failed: {exc}")
             return []
-        r.raise_for_status()
-        payload = r.json()
-    except requests.RequestException as exc:
-        if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
-            print(f"debug: request failed: {exc}")
-        return []
 
     if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
         if isinstance(payload, dict):
@@ -219,9 +236,15 @@ def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=Tr
     data = payload.get("data")
     if isinstance(data, str):
         # Some endpoints return data as message string on soft failures
+        if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+            print(f"debug: data message={data}")
         return []
     if not isinstance(data, dict):
         data = {}
+
+    if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+        preview = str(payload)
+        print(f"debug: payload_preview={preview[:400]}")
 
     # getMinPrice style response
     min_price = data.get("minPrice") or data.get("price") or payload.get("minPrice")
@@ -372,6 +395,8 @@ def main():
     print(f"alerts_sent={triggered_count}")
     if fetched_count == 0:
         print("hint: fetched_records=0 通常表示 API 没返回可解析票价，请检查 RAPIDAPI_* 参数与 fromId/toId 格式")
+    if RATE_LIMIT_ABORTED:
+        print("hint: 本次请求被 RapidAPI 限流中止，可降低频率/路线数，或增大 REQUEST_INTERVAL_SECONDS")
 
 
 if __name__ == "__main__":
