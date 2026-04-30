@@ -1,21 +1,202 @@
 import os
+import smtplib
+import sqlite3
+from datetime import date, timedelta
+from email.mime.text import MIMEText
+
 import requests
-from datetime import datetime
+import yaml
+
+DB_PATH = "prices.db"
+
+
+def load_config():
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def init_db(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prices (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          route TEXT NOT NULL,
+          depart_date TEXT NOT NULL,
+          price REAL NOT NULL,
+          is_direct INTEGER NOT NULL,
+          fetched_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alerts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          route TEXT NOT NULL,
+          depart_date TEXT NOT NULL,
+          price REAL NOT NULL,
+          alerted_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
 
 def send_feishu(webhook: str, text: str):
     payload = {"msg_type": "text", "content": {"text": text}}
     r = requests.post(webhook, json=payload, timeout=15)
     r.raise_for_status()
 
+
+def send_email(subject: str, body: str):
+    host = os.getenv("SMTP_HOST")
+    port = int(os.getenv("SMTP_PORT", "587"))
+    user = os.getenv("SMTP_USER")
+    password = os.getenv("SMTP_PASS")
+    sender = os.getenv("SMTP_FROM", user or "")
+    receiver = os.getenv("ALERT_EMAIL_TO")
+
+    required = [host, user, password, sender, receiver]
+    if not all(required):
+        raise RuntimeError("Missing SMTP_* or ALERT_EMAIL_TO environment variables")
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = receiver
+
+    with smtplib.SMTP(host, port, timeout=30) as server:
+        server.starttls()
+        server.login(user, password)
+        server.sendmail(sender, [receiver], msg.as_string())
+
+
+def notify_dual(feishu_webhook: str, text: str, email_enabled: bool):
+    send_feishu(feishu_webhook, text)
+    if email_enabled:
+        send_email("机票降价提醒", text)
+
+
+def save_price(conn, route, depart_date, price, is_direct):
+    conn.execute(
+        """
+        INSERT INTO prices(route, depart_date, price, is_direct, fetched_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        """,
+        (route, depart_date, price, 1 if is_direct else 0),
+    )
+    conn.commit()
+
+
+def get_avg_30d(conn, route, depart_date):
+    cur = conn.execute(
+        """
+        SELECT AVG(price)
+        FROM prices
+        WHERE route = ?
+          AND depart_date = ?
+          AND fetched_at >= datetime('now', '-30 days')
+        """,
+        (route, depart_date),
+    )
+    row = cur.fetchone()
+    return row[0] if row and row[0] else None
+
+
+def already_alerted_recently(conn, route, depart_date, price, hours=24):
+    cur = conn.execute(
+        """
+        SELECT 1
+        FROM alerts
+        WHERE route = ?
+          AND depart_date = ?
+          AND price = ?
+          AND alerted_at >= datetime('now', ?)
+        LIMIT 1
+        """,
+        (route, depart_date, price, f"-{hours} hours"),
+    )
+    return cur.fetchone() is not None
+
+
+def save_alert(conn, route, depart_date, price):
+    conn.execute(
+        """
+        INSERT INTO alerts(route, depart_date, price, alerted_at)
+        VALUES (?, ?, ?, datetime('now'))
+        """,
+        (route, depart_date, price),
+    )
+    conn.commit()
+
+
+def should_alert(current_price, avg_30d, threshold_ratio):
+    return avg_30d is not None and avg_30d > 0 and current_price <= avg_30d * threshold_ratio
+
+
+def fetch_prices_for_route(origin, dest, start_date, end_date, direct_only=True):
+    """
+    占位函数：这里接入合法的机票数据源。
+    返回结构示例:
+    [{"depart_date":"2026-06-18", "price":1280, "is_direct":True, "url":"https://..."}]
+    """
+    _ = (origin, dest, start_date, end_date, direct_only)
+    return []
+
+
 def main():
     webhook = os.getenv("FEISHU_WEBHOOK")
     if not webhook:
         raise RuntimeError("Missing FEISHU_WEBHOOK secret")
 
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    msg = f"✅ GitHub Actions 测试成功\n时间: {now}\n后续将替换为机票降价提醒。"
-    send_feishu(webhook, msg)
-    print("done")
+    cfg = load_config()
+    threshold_ratio = float(cfg.get("threshold_ratio", 0.7))
+    lookahead_days = int(cfg.get("lookahead_days", 90))
+    direct_only = bool(cfg.get("direct_only", True))
+    email_enabled = bool(cfg.get("email_enabled", True))
+
+    start = date.today()
+    end = start + timedelta(days=lookahead_days)
+
+    conn = sqlite3.connect(DB_PATH)
+    init_db(conn)
+
+    for origin in cfg["origins"]:
+        for dest in cfg["destinations"]:
+            route = f"{origin}-{dest}"
+            prices = fetch_prices_for_route(origin, dest, start.isoformat(), end.isoformat(), direct_only)
+
+            for item in prices:
+                depart_date = item["depart_date"]
+                price = float(item["price"])
+                is_direct = bool(item.get("is_direct", False))
+                url = item.get("url", "")
+
+                if direct_only and not is_direct:
+                    continue
+
+                save_price(conn, route, depart_date, price, is_direct)
+                avg_30d = get_avg_30d(conn, route, depart_date)
+
+                if should_alert(price, avg_30d, threshold_ratio):
+                    if already_alerted_recently(conn, route, depart_date, price, hours=24):
+                        continue
+
+                    drop = (1 - price / avg_30d) * 100
+                    text = (
+                        f"✈️ 机票降价提醒（直飞）\n"
+                        f"航线: {route}\n"
+                        f"出发: {depart_date}\n"
+                        f"当前价: ¥{price:.0f}\n"
+                        f"近30天均价: ¥{avg_30d:.0f}\n"
+                        f"降幅: {drop:.1f}%\n"
+                        f"链接: {url}"
+                    )
+                    notify_dual(webhook, text, email_enabled)
+                    save_alert(conn, route, depart_date, price)
+
+    conn.close()
+
 
 if __name__ == "__main__":
     main()
