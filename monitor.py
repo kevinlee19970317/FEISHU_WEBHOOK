@@ -6,6 +6,7 @@ from email.mime.text import MIMEText
 
 import requests
 import yaml
+import json
 
 DB_PATH = "prices.db"
 
@@ -134,6 +135,65 @@ def should_alert(current_price, avg_30d, threshold_ratio):
     return avg_30d is not None and avg_30d > 0 and current_price <= avg_30d * threshold_ratio
 
 
+
+
+def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=True):
+    endpoint = os.getenv("RAPIDAPI_FLIGHTS_URL", "https://booking-com15.p.rapidapi.com/api/v1/flights/searchFlights")
+    host = os.getenv("RAPIDAPI_HOST")
+    key = os.getenv("RAPIDAPI_KEY")
+
+    if not host or not key:
+        return []
+
+    currency = os.getenv("RAPIDAPI_CURRENCY", "CNY")
+    params = {
+        "fromId": origin,
+        "toId": dest,
+        "departDate": start_date,
+        "returnDate": end_date,
+        "currency_code": currency,
+    }
+
+    extra = os.getenv("RAPIDAPI_EXTRA_PARAMS", "")
+    if extra:
+        try:
+            params.update(json.loads(extra))
+        except json.JSONDecodeError:
+            pass
+
+    headers = {
+        "x-rapidapi-host": host,
+        "x-rapidapi-key": key,
+        "Content-Type": "application/json",
+    }
+
+    r = requests.get(endpoint, headers=headers, params=params, timeout=30)
+    r.raise_for_status()
+    payload = r.json()
+
+    flights = payload.get("data", {}).get("flights", [])
+    results = []
+    for f in flights:
+        price_obj = f.get("price") or {}
+        total = price_obj.get("units") or price_obj.get("total") or f.get("priceValue")
+        depart_date = f.get("departureDate") or start_date
+        is_non_stop = f.get("isDirect")
+        if is_non_stop is None:
+            segments = f.get("segments") or []
+            is_non_stop = len(segments) <= 1
+
+        if total is None:
+            continue
+
+        results.append({
+            "depart_date": str(depart_date)[:10],
+            "price": float(total),
+            "is_direct": bool(is_non_stop),
+            "url": f.get("deepLink") or endpoint,
+        })
+
+    return results
+
 def build_mock_prices(start_day, route):
     depart_date = (start_day + timedelta(days=7)).isoformat()
     mock_price = float(os.getenv("MOCK_PRICE", "1200"))
@@ -158,7 +218,10 @@ def fetch_prices_for_route(origin, dest, start_date, end_date, direct_only=True)
         start_day = date.fromisoformat(start_date)
         return build_mock_prices(start_day, route)
 
-    _ = (end_date, direct_only)
+    rapidapi_results = fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only)
+    if rapidapi_results:
+        return rapidapi_results
+
     return []
 
 
