@@ -134,13 +134,31 @@ def should_alert(current_price, avg_30d, threshold_ratio):
     return avg_30d is not None and avg_30d > 0 and current_price <= avg_30d * threshold_ratio
 
 
+def build_mock_prices(start_day, route):
+    depart_date = (start_day + timedelta(days=7)).isoformat()
+    mock_price = float(os.getenv("MOCK_PRICE", "1200"))
+    mock_is_direct = os.getenv("MOCK_IS_DIRECT", "true").lower() == "true"
+    return [{
+        "depart_date": depart_date,
+        "price": mock_price,
+        "is_direct": mock_is_direct,
+        "url": f"https://example.com/flights/{route}/{depart_date}",
+    }]
+
+
 def fetch_prices_for_route(origin, dest, start_date, end_date, direct_only=True):
     """
-    占位函数：这里接入合法的机票数据源。
-    返回结构示例:
-    [{"depart_date":"2026-06-18", "price":1280, "is_direct":True, "url":"https://..."}]
+    默认不抓取真实数据（避免非法爬取），返回空。
+
+    若要联调提醒链路，可设置环境变量 MOCK_PRICE_MODE=true
+    来生成一条模拟票价数据。
     """
-    _ = (origin, dest, start_date, end_date, direct_only)
+    route = f"{origin}-{dest}"
+    if os.getenv("MOCK_PRICE_MODE", "false").lower() == "true":
+        start_day = date.fromisoformat(start_date)
+        return build_mock_prices(start_day, route)
+
+    _ = (end_date, direct_only)
     return []
 
 
@@ -160,6 +178,21 @@ def main():
 
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
+
+    if os.getenv("MOCK_PRICE_MODE", "false").lower() == "true":
+        mock_baseline = float(os.getenv("MOCK_BASELINE_PRICE", "2000"))
+        baseline_depart = (start + timedelta(days=7)).isoformat()
+        for origin in cfg["origins"]:
+            for dest in cfg["destinations"]:
+                route = f"{origin}-{dest}"
+                conn.execute(
+                    """
+                    INSERT INTO prices(route, depart_date, price, is_direct, fetched_at)
+                    VALUES (?, ?, ?, 1, datetime('now', '-1 day'))
+                    """,
+                    (route, baseline_depart, mock_baseline),
+                )
+        conn.commit()
 
     for origin in cfg["origins"]:
         for dest in cfg["destinations"]:
