@@ -1,0 +1,10 @@
+on:
+  push:                # 代码推送时自动触发
+  workflow_dispatch:   # 👈 加上这一行，开启手动触发开关
+jobs:
+  check-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: python -m py_compile monitor.py  # 检查你的代码是否有语法错误
