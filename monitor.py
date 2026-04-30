@@ -7,6 +7,7 @@ from email.mime.text import MIMEText
 import requests
 import yaml
 import json
+import time
 
 DB_PATH = "prices.db"
 
@@ -153,6 +154,8 @@ def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=Tr
     key = (os.getenv("RAPIDAPI_KEY") or "").strip()
 
     if not endpoint or not host or not key:
+        if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+            print("debug: rapidapi skipped because endpoint/host/key missing")
         return []
 
     currency = env_or_default("RAPIDAPI_CURRENCY", "CNY")
@@ -181,9 +184,34 @@ def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=Tr
         "Content-Type": "application/json",
     }
 
-    r = requests.get(endpoint, headers=headers, params=params, timeout=30)
-    r.raise_for_status()
-    payload = r.json()
+    if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+        print(f"debug: request endpoint={endpoint}")
+        print(
+            "debug: "
+            f"fromId={params.get('fromId')} "
+            f"toId={params.get('toId')} "
+            f"departDate={params.get('departDate')}"
+        )
+
+    try:
+        r = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        if r.status_code == 429:
+            retry_after = r.headers.get("Retry-After")
+            if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+                print(f"debug: rapidapi rate limited (429), retry_after={retry_after}")
+            return []
+        r.raise_for_status()
+        payload = r.json()
+    except requests.RequestException as exc:
+        if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+            print(f"debug: request failed: {exc}")
+        return []
+
+    if os.getenv("DEBUG_MONITOR", "false").lower() == "true":
+        if isinstance(payload, dict):
+            print(f"debug: response top_keys={list(payload.keys())}")
+        else:
+            print(f"debug: response type={type(payload)}")
 
     if not isinstance(payload, dict):
         return []
@@ -304,6 +332,9 @@ def main():
         for dest in cfg["destinations"]:
             route = f"{origin}-{dest}"
             prices = fetch_prices_for_route(origin, dest, start.isoformat(), end.isoformat(), direct_only)
+            sleep_seconds = float(env_or_default("REQUEST_INTERVAL_SECONDS", "0"))
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
 
             for item in prices:
                 depart_date = item["depart_date"]
@@ -339,6 +370,8 @@ def main():
     conn.close()
     print(f"fetched_records={fetched_count}")
     print(f"alerts_sent={triggered_count}")
+    if fetched_count == 0:
+        print("hint: fetched_records=0 通常表示 API 没返回可解析票价，请检查 RAPIDAPI_* 参数与 fromId/toId 格式")
 
 
 if __name__ == "__main__":
