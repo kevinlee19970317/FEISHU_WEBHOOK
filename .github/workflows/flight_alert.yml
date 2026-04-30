@@ -35,4 +35,7 @@ jobs:
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
           RAPIDAPI_HOST: ${{ secrets.RAPIDAPI_HOST }}
+          RAPIDAPI_FLIGHTS_URL: ${{ secrets.RAPIDAPI_FLIGHTS_URL }}
+          RAPIDAPI_CURRENCY: ${{ secrets.RAPIDAPI_CURRENCY }}
+          RAPIDAPI_EXTRA_PARAMS: ${{ secrets.RAPIDAPI_EXTRA_PARAMS }}
         run: python monitor.py
