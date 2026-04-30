@@ -41,4 +41,10 @@ jobs:
           RAPIDAPI_FLIGHTS_URL: ${{ secrets.RAPIDAPI_FLIGHTS_URL }}
           RAPIDAPI_CURRENCY: ${{ secrets.RAPIDAPI_CURRENCY }}
           RAPIDAPI_EXTRA_PARAMS: ${{ secrets.RAPIDAPI_EXTRA_PARAMS }}
+          SKYSCANNER_API_KEY: ${{ secrets.SKYSCANNER_API_KEY }}
+          SKYSCANNER_URL: ${{ secrets.SKYSCANNER_URL }}
+          SKYSCANNER_MARKET: ${{ secrets.SKYSCANNER_MARKET }}
+          SKYSCANNER_LOCALE: ${{ secrets.SKYSCANNER_LOCALE }}
+          SKYSCANNER_CURRENCY: ${{ secrets.SKYSCANNER_CURRENCY }}
+          SKYSCANNER_EXTRA_PARAMS: ${{ secrets.SKYSCANNER_EXTRA_PARAMS }}
         run: python monitor.py
