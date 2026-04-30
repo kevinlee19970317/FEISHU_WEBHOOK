@@ -11,6 +11,14 @@ import json
 DB_PATH = "prices.db"
 
 
+def env_or_default(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
 def load_config():
     with open("config.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -135,22 +143,28 @@ def should_alert(current_price, avg_30d, threshold_ratio):
     return avg_30d is not None and avg_30d > 0 and current_price <= avg_30d * threshold_ratio
 
 
+def should_force_alert() -> bool:
+    return (os.getenv("FORCE_ALERT", "false").strip().lower() == "true")
 
 
 def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=True):
-    endpoint = os.getenv("RAPIDAPI_FLIGHTS_URL", "https://booking-com15.p.rapidapi.com/api/v1/flights/searchFlights")
-    host = os.getenv("RAPIDAPI_HOST")
-    key = os.getenv("RAPIDAPI_KEY")
+    endpoint = env_or_default("RAPIDAPI_FLIGHTS_URL", "https://booking-com15.p.rapidapi.com/api/v1/flights/getMinPrice")
+    host = (os.getenv("RAPIDAPI_HOST") or "").strip()
+    key = (os.getenv("RAPIDAPI_KEY") or "").strip()
 
-    if not host or not key:
+    if not endpoint or not host or not key:
         return []
 
-    currency = os.getenv("RAPIDAPI_CURRENCY", "CNY")
+    currency = env_or_default("RAPIDAPI_CURRENCY", "CNY")
+    from_id = os.getenv("RAPIDAPI_FROM_ID_TEMPLATE", "{code}.AIRPORT").format(code=origin)
+    to_id = os.getenv("RAPIDAPI_TO_ID_TEMPLATE", "{code}.AIRPORT").format(code=dest)
+
     params = {
-        "fromId": origin,
-        "toId": dest,
+        "fromId": from_id,
+        "toId": to_id,
         "departDate": start_date,
         "returnDate": end_date,
+        "cabinClass": os.getenv("RAPIDAPI_CABIN_CLASS", "ECONOMY"),
         "currency_code": currency,
     }
 
@@ -171,7 +185,20 @@ def fetch_prices_via_rapidapi(origin, dest, start_date, end_date, direct_only=Tr
     r.raise_for_status()
     payload = r.json()
 
-    flights = payload.get("data", {}).get("flights", [])
+    data = payload.get("data") or {}
+
+    # getMinPrice style response
+    min_price = data.get("minPrice") or data.get("price") or payload.get("minPrice")
+    if min_price is not None:
+        return [{
+            "depart_date": start_date,
+            "price": float(min_price),
+            "is_direct": True,
+            "url": endpoint,
+        }]
+
+    # searchFlights style response
+    flights = data.get("flights", [])
     results = []
     for f in flights:
         price_obj = f.get("price") or {}
@@ -242,6 +269,9 @@ def main():
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
+    fetched_count = 0
+    triggered_count = 0
+
     if os.getenv("MOCK_PRICE_MODE", "false").lower() == "true":
         mock_baseline = float(os.getenv("MOCK_BASELINE_PRICE", "2000"))
         baseline_depart = (start + timedelta(days=7)).isoformat()
@@ -272,9 +302,10 @@ def main():
                     continue
 
                 save_price(conn, route, depart_date, price, is_direct)
+                fetched_count += 1
                 avg_30d = get_avg_30d(conn, route, depart_date)
 
-                if should_alert(price, avg_30d, threshold_ratio):
+                if should_alert(price, avg_30d, threshold_ratio) or should_force_alert():
                     if already_alerted_recently(conn, route, depart_date, price, hours=24):
                         continue
 
@@ -290,8 +321,11 @@ def main():
                     )
                     notify_dual(webhook, text, email_enabled)
                     save_alert(conn, route, depart_date, price)
+                    triggered_count += 1
 
     conn.close()
+    print(f"fetched_records={fetched_count}")
+    print(f"alerts_sent={triggered_count}")
 
 
 if __name__ == "__main__":
